@@ -1,5 +1,6 @@
 const std = @import("std");
 const zap = @import("zap");
+const print = std.debug.print;
 
 var allocator: std.mem.Allocator = undefined;
 
@@ -17,9 +18,40 @@ const ValueError = error{
     UnknownValue,
 };
 
+const api_params = struct {
+    n: u16,
+    min: u16,
+    max: u16,
+    fn default() api_params {
+        return .{ .n = 5, .min = 4, .max = 9 };
+    }
+    /// manual param decoding (can be done faster in zap)
+    fn parse_params(s: []u8) !api_params {
+        errdefer print("Error when parsing params\n", .{});
+        const fields = enum { min, max, n };
+        var ret = api_params.default();
+        var iter = std.mem.split(u8, s, "&");
+
+        while (iter.next()) |para| {
+            var inner_iter = std.mem.split(u8, para, "=");
+            const p = std.meta.stringToEnum(fields, inner_iter.next() orelse return ValueError.UnknownValue) orelse return ValueError.UnknownValue;
+            const v = inner_iter.next() orelse return ValueError.UnknownValue;
+            switch (p) {
+                .min => ret.min = try std.fmt.parseInt(u16, v, 10),
+                .max => ret.max = try std.fmt.parseInt(u16, v, 10),
+                .n => ret.n = try std.fmt.parseInt(u16, v, 10),
+            }
+        }
+        return ret;
+    }
+};
+
+/// open and return the corresponding wordlist to the given input
 pub fn select_file(inp: []const u8) !std.fs.File {
+    const path = inp;
+
     const Languages = enum { de, en, fr };
-    const l = std.meta.stringToEnum(Languages, inp) orelse return ValueError.InvalidInput;
+    const l = std.meta.stringToEnum(Languages, path) orelse return ValueError.InvalidInput;
     return switch (l) {
         .en => try std.fs.cwd().openFile("./src/english_words.txt", .{}),
         .de => try std.fs.cwd().openFile("./src/german_words.txt", .{}),
@@ -27,7 +59,9 @@ pub fn select_file(inp: []const u8) !std.fs.File {
     };
 }
 
+/// read wordlist and return randomly selected words
 pub fn read_file(n: u32, f: std.fs.File, min: u16, max: u16) !std.ArrayList(u8) {
+    errdefer print("Error when reading_file\n", .{});
     if (min < 3) {
         return ValueError.ValueTooSmall;
     }
@@ -89,6 +123,15 @@ pub fn read_file(n: u32, f: std.fs.File, min: u16, max: u16) !std.ArrayList(u8) 
     return output;
 }
 
+/// on error return the "default" page
+fn on_error(r: zap.Request) void {
+    r.setHeader("Content-Type", "text/html; charset=UTF-8") catch return;
+    r.sendBody("<html><body><h1>passWord</h1>API example: <tt>../en?min=4&max=8&n=6</tt> where min/max limits the word" ++
+        " length and n denotes the amount of words returned. <ul> <li><a href=\"./en?min=4&max=8&n=6\">english</a></li>" ++
+        " <li><a href=\"./de?min=4&max=8&n=6\">deutsch</a></li> <li><a href=\"./fr?min=4&max=8&n=6\">français</a></li>" ++
+        " </ul></body></html>") catch return;
+}
+
 fn on_request(r: zap.Request) void {
     if (r.methodAsEnum() != .GET) return;
 
@@ -105,13 +148,18 @@ fn on_request(r: zap.Request) void {
 
         if (select_file(the_path)) |the_file| {
             defer the_file.close();
-            const buff = read_file(6, the_file, 4, 9) catch return;
+            var param: api_params = undefined;
+            if (r.query) |q| {
+                param = api_params.parse_params(@constCast(q)) catch return on_error(r);
+            } else {
+                param = api_params.default();
+            }
+            const buff = read_file(param.n, the_file, param.min, param.max) catch return on_error(r);
             const str_buf: []u8 = buff.items;
-            r.setHeader("Content-Type", "text/plain; charset=UTF-8") catch return;
-            r.sendBody(str_buf) catch return;
+            r.setHeader("Content-Type", "text/plain; charset=UTF-8") catch return on_error(r);
+            r.sendBody(str_buf) catch return on_error(r);
         } else |_| {
-            r.setHeader("Content-Type", "text/html; charset=UTF-8") catch return;
-            r.sendBody("<html><body><h1>Languages</h1><ul> <li><a href=\"./en\">english</a></li> <li><a href=\"./de\">deutsch</a></li> <li><a href=\"./fr\">français</a></li> </ul></body></html>") catch return;
+            on_error(r);
         }
     }
 }
@@ -136,7 +184,7 @@ pub fn main() !void {
         });
         try listener.listen();
 
-        std.debug.print("Listening on 0.0.0.0:3355\n", .{});
+        print("Listening on 0.0.0.0:3355\n", .{});
 
         zap.start(.{
             .threads = 24,
