@@ -1,8 +1,3 @@
----
-title: title
-layout: page
----
-
 # passWord
 
 [xkcd](https://xkcd.com/936/) inspired password generator.
